@@ -1,0 +1,68 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Wed May 21 13:35:07 2025
+
+@author: tasnuva.rouf
+"""
+
+import xarray as xr
+import numpy as np
+import matplotlib.pyplot as plt
+import s3fs
+import os
+
+def process_file(url, crop_bounds, out_dir, plot=False):
+    """
+    Processes one NetCDF file:
+    - Crop
+    - Coarsen (8x ~ 8 km)
+    - Daily mean (from hourly)
+    - Save NetCDF
+    """
+    s3 = s3fs.S3FileSystem(anon=True)
+    with s3.open(url, mode='rb') as infile:
+        ds = xr.open_dataset(infile, engine='h5netcdf')
+
+        # Crop
+        lat_min, lat_max, lon_min, lon_max = crop_bounds
+        ds_crop = ds.sel(lat=slice(lat_min, lat_max), lon=slice(lon_min, lon_max))
+
+        # Upscale from ~1 km to ~8 km (using nanmean)
+        ds_coarse = ds_crop.coarsen(lat=8, lon=8, boundary='trim').reduce(np.nanmean)
+
+        # Daily mean from hourly data
+        ds_daily = ds_coarse.resample(time='1D').mean()
+
+        # Save NetCDF
+        file_name = os.path.basename(url).replace('.nc', '_daily_crop.nc')
+        local_path = os.path.join(out_dir, file_name)
+        ds_daily.to_netcdf(local_path)
+        print(f"Saved: {local_path}")
+
+        # Optional: Plot first day
+        if plot and 'Tair' in ds_daily:
+            plt.figure(figsize=(10, 6))
+            ds_daily['Tair'].isel(time=0).plot(cmap='coolwarm')
+            plt.title('Tair Daily Mean (First Day)')
+            plt.savefig(local_path.replace('.nc', '.png'), dpi=300)
+            plt.close()
+
+        return ds_daily
+
+# === User inputs ===
+s3_folder = 'nasa-waterinsight/test/NLDAS3_Forcing/201501'
+crop_bounds = (9.5,25,-85,-58)  # (lat_min, lat_max, lon_min, lon_max)
+output_dir = 'processed_netcdf_output'
+os.makedirs(output_dir, exist_ok=True)
+
+# === Process all files ===
+s3 = s3fs.S3FileSystem(anon=True)
+files = s3.ls(s3_folder)
+
+for f in files:
+    if f.endswith('.nc'):
+        s3_url = 's3://' + f
+        try:
+            process_file(s3_url, crop_bounds, output_dir, plot=True)
+        except Exception as e:
+            print(f"Failed to process {s3_url}: {e}")
